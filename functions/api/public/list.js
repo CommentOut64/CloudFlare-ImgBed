@@ -274,6 +274,10 @@ export async function onRequest(context) {
             metadata: file.metadata
         }));
 
+        const cacheControl = nocache
+            ? 'no-cache, no-store, must-revalidate'
+            : 'public, max-age=60, s-maxage=300, stale-while-revalidate=600';
+
         return new Response(JSON.stringify({
             files: safeFiles,
             directories: filteredDirectories,
@@ -282,7 +286,11 @@ export async function onRequest(context) {
             allowedDirs: allowedDirs, // 返回允许的目录列表供前端使用
             fromCache: cachedData.fromCache,
         }), {
-            headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            headers: {
+                'Content-Type': 'application/json',
+                'Cache-Control': cacheControl,
+                ...corsHeaders
+            }
         });
 
     } catch (error) {

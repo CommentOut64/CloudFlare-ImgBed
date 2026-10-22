@@ -151,7 +151,7 @@ export async function transformImageRequestViaUrl(context) {
         status: 302,
         headers: {
             'Location': transformUrl.toString(),
-            'Cache-Control': 'private, no-store, max-age=0',
+            'Cache-Control': 'public, max-age=86400, s-maxage=86400',
         },
     });
 }
