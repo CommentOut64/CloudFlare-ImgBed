@@ -10,7 +10,7 @@ export function isDomainAllowed(context) {
         try {
             const refererUrl = new URL(Referer);
             if (allowedDomains && allowedDomains.trim() !== '') {
-                const domains = allowedDomains.split(',');
+                const domains = allowedDomains.split(',').map(d => d.trim()).filter(Boolean);
                 domains.push(url.hostname);// 把自身域名加入白名单
 
                 let isAllowed = domains.some(domain => {

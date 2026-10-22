@@ -111,6 +111,7 @@ async function getPublicFileList(context, url, dir, recursive, options = {}) {
             FileType: file.metadata?.FileType,
             TimeStamp: file.metadata?.TimeStamp,
             FileSize: file.metadata?.FileSize,
+            Tags: file.metadata?.Tags || [],
         }
     }));
 
