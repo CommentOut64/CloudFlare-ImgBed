@@ -4,6 +4,11 @@
  */
 import { fetchOthersConfig } from "../../utils/sysConfig";
 import { readIndex } from '../../utils/indexManager.js';
+import { buildPublicFileListCacheKey } from '../../utils/publicListCacheKey.js';
+
+// 公开列表缓存时长（秒）。缓存只是性能优化，数据以索引为准：
+// 时间太长会让“漏清一次缓存 = 页面空白一整天”，这里取 1 小时作为兜底。
+const PUBLIC_LIST_CACHE_TTL = 3600;
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -57,20 +62,33 @@ function isAllowedDirectory(dir, allowedDirs) {
  * @param {URL} url - 请求URL
  * @param {string} dir - 目录
  * @param {boolean} recursive - 是否递归
+ * @param {Object} [options]
+ * @param {boolean} [options.nocache] - 跳过读取缓存（用于手动刷新），取到新数据后依然会回写缓存
  * @returns {Promise<Object>} 文件列表和目录列表，包含 fromCache 字段
  */
-async function getPublicFileList(context, url, dir, recursive) {
-    // 构建缓存键（目录格式去掉末尾的/，与清除缓存时的格式一致）
-    const cacheDir = dir.replace(/\/$/, '');
-    const cacheKey = `${url.origin}/api/publicFileList?dir=${cacheDir}&recursive=${recursive}`;
+async function getPublicFileList(context, url, dir, recursive, options = {}) {
+    const { nocache = false } = options;
+
+    // 缓存键与清理方共用同一份实现（utils/publicListCacheKey.js）
+    const cacheKey = buildPublicFileListCacheKey(url.origin, dir, recursive);
+    const cache = caches.default;
 
     // 检查缓存中是否有记录
-    const cache = caches.default;
-    const cacheRes = await cache.match(cacheKey);
-    if (cacheRes) {
-        const data = JSON.parse(await cacheRes.text());
-        data.fromCache = true;
-        return data;
+    if (!nocache) {
+        const cacheRes = await cache.match(cacheKey);
+        if (cacheRes) {
+            const cachedText = await cacheRes.text();
+            // 清理缓存时会写入一个空的 max-age=0 标记，万一带 body 为空直接按未命中处理
+            if (cachedText) {
+                try {
+                    const data = JSON.parse(cachedText);
+                    data.fromCache = true;
+                    return data;
+                } catch (error) {
+                    console.error('Invalid publicFileList cache entry, rebuilding:', error.message || error);
+                }
+            }
+        }
     }
 
     // 读取文件列表
@@ -102,13 +120,26 @@ async function getPublicFileList(context, url, dir, recursive) {
         totalCount: result.totalCount,
     };
 
-    // 缓存结果，缓存时间为24小时
-    await cache.put(cacheKey, new Response(JSON.stringify(cacheData), {
-        headers: {
-            "Content-Type": "application/json",
-            "Cache-Control": "public, max-age=86400",
+    // 空结果不写缓存：索引可能处于“尚未就绪/正在重建”的瞬间，
+    // 一旦把空列表缓存下来，前端会在整个 TTL 内都看不到任何图片。
+    const hasData = files.length > 0 || (result.directories || []).length > 0;
+    if (hasData) {
+        const cachePut = cache.put(cacheKey, new Response(JSON.stringify(cacheData), {
+            headers: {
+                "Content-Type": "application/json",
+                "Cache-Control": `public, max-age=${PUBLIC_LIST_CACHE_TTL}`,
+            }
+        })).catch((error) => {
+            console.error('Failed to write publicFileList cache:', error.message || error);
+        });
+
+        // 不阻塞响应，让请求尽快返回
+        if (typeof context.waitUntil === 'function') {
+            context.waitUntil(cachePut);
+        } else {
+            await cachePut;
         }
-    }));
+    }
 
     cacheData.fromCache = false;
     return cacheData;
@@ -162,6 +193,10 @@ export async function onRequest(context) {
         const recursive = url.searchParams.get('recursive') === 'true';
         const fileType = url.searchParams.get('type') || ''; // image, video, audio, other
 
+        // 手动绕过缓存（前端“刷新”按钮用）：只跳过读取，拿到的新数据仍会回写缓存
+        const nocacheParam = String(url.searchParams.get('nocache') || '').toLowerCase();
+        const nocache = nocacheParam === '1' || nocacheParam === 'true';
+
         // 检查目录权限
         if (!isAllowedDirectory(dir, allowedDirs)) {
             return new Response(JSON.stringify({ error: 'Directory not allowed' }), {
@@ -187,7 +222,7 @@ export async function onRequest(context) {
         const count = parseInt(url.searchParams.get('count'), 10) || 50;
 
         // 获取文件列表（带缓存）
-        const cachedData = await getPublicFileList(context, url, dir, recursive);
+        const cachedData = await getPublicFileList(context, url, dir, recursive, { nocache });
 
         // 过滤子目录，只返回允许的目录
         const filteredDirectories = cachedData.directories.filter(subDir => {

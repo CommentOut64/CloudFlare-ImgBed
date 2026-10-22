@@ -1,4 +1,9 @@
 import { fetchOthersConfig } from "./sysConfig";
+import {
+    buildPublicFileListCacheKey,
+    buildRandomFileListCacheKey,
+    expandDirAncestors,
+} from "./publicListCacheKey.js";
 
 let othersConfig = {};
 let cfZoneId = "";
@@ -30,17 +35,30 @@ export async function purgeCFCache(env, cdnUrl) {
     }
 }
 
+// cache.delete 有 bug，通过写入一个 max-age=0 的 response 来清除缓存
+// 注意：Response 只能被消费一次，每次 put 都要新建一个
+function createPurgeMarker() {
+    return new Response(null, {
+        headers: { 'Cache-Control': 'max-age=0' },
+    });
+}
+
+async function putPurgeMarkers(keys) {
+    const cache = caches.default;
+    await Promise.all(Array.from(keys).map((key) => cache.put(key, createPurgeMarker())));
+}
+
 export async function purgeRandomFileListCache(origin, ...dirs) {
     try {
-        const cache = caches.default;
-        // cache.delete有bug，通过写入一个max-age=0的response来清除缓存
-        const nullResponse = new Response(null, {
-            headers: { 'Cache-Control': 'max-age=0' },
-        });
-
+        // 随机图接口是递归查询，子目录变化同样会让祖先目录的列表失效
+        const keys = new Set();
         for (const dir of dirs) {
-            await cache.put(`${origin}/api/randomFileList?dir=${dir}`, nullResponse);
+            for (const target of expandDirAncestors(dir)) {
+                keys.add(buildRandomFileListCacheKey(origin, target));
+            }
         }
+
+        await putPurgeMarkers(keys);
     } catch (error) {
         console.error('Failed to clear randomFileList cache:', error);
     }
@@ -48,17 +66,17 @@ export async function purgeRandomFileListCache(origin, ...dirs) {
 
 export async function purgePublicFileListCache(origin, ...dirs) {
     try {
-        const cache = caches.default;
-        // cache.delete有bug，通过写入一个max-age=0的response来清除缓存
-        const nullResponse = new Response(null, {
-            headers: { 'Cache-Control': 'max-age=0' },
-        });
-
+        // 递归和非递归两种缓存都要清；并且必须连同所有祖先目录一起清，
+        // 否则往 gallery/sub/ 上传文件时，gallery（递归）的列表会一直是旧的。
+        const keys = new Set();
         for (const dir of dirs) {
-            // 清除递归和非递归两种缓存
-            await cache.put(`${origin}/api/publicFileList?dir=${dir}&recursive=false`, nullResponse);
-            await cache.put(`${origin}/api/publicFileList?dir=${dir}&recursive=true`, nullResponse);
+            for (const target of expandDirAncestors(dir)) {
+                keys.add(buildPublicFileListCacheKey(origin, target, false));
+                keys.add(buildPublicFileListCacheKey(origin, target, true));
+            }
         }
+
+        await putPurgeMarkers(keys);
     } catch (error) {
         console.error('Failed to clear publicFileList cache:', error);
     }

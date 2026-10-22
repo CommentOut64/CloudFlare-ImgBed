@@ -1,6 +1,7 @@
 import { fetchOthersConfig } from "../utils/sysConfig";
 import { matchesFileType } from "../utils/mimeTypes";
 import { readIndex } from "../utils/indexManager";
+import { buildRandomFileListCacheKey } from "../utils/publicListCacheKey.js";
 import { detectDevice, resolveOrientation, addClientHintsHeaders } from "./adaptive.js";
 
 // CORS 跨域响应头
@@ -175,11 +176,22 @@ export async function onRequest(context) {
 }
 
 async function getRandomFileList(context, url, dir) {
+    // 缓存键与清理方共用同一份实现（utils/publicListCacheKey.js）
+    const cacheKey = buildRandomFileListCacheKey(url.origin, dir);
+
     // 检查缓存中是否有记录，有则直接返回
     const cache = caches.default;
-    const cacheRes = await cache.match(`${url.origin}/api/randomFileList?dir=${dir}`);
+    const cacheRes = await cache.match(cacheKey);
     if (cacheRes) {
-        return JSON.parse(await cacheRes.text());
+        const cachedText = await cacheRes.text();
+        // 清理缓存时会写入一个空的 max-age=0 标记，body 为空（或解析失败）时按未命中处理
+        if (cachedText) {
+            try {
+                return JSON.parse(cachedText);
+            } catch (error) {
+                console.error('Invalid randomFileList cache entry, rebuilding:', error.message || error);
+            }
+        }
     }
 
     let allRecords = await readIndex(context, { directory: dir, count: -1, includeSubdirFiles: true, accessStatus: 'normal' });
@@ -195,7 +207,7 @@ async function getRandomFileList(context, url, dir) {
     });
 
     // 缓存结果，缓存时间为24小时
-    await cache.put(`${url.origin}/api/randomFileList?dir=${dir}`, new Response(JSON.stringify(allRecords), {
+    await cache.put(cacheKey, new Response(JSON.stringify(allRecords), {
         headers: {
             "Content-Type": "application/json",
         }
